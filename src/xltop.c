@@ -98,8 +98,8 @@ static double top_interval = 10;
 static struct ev_timer top_timer_w;
 static N_BUF(top_nb);
 
-static const char *clus_default = XLTOP_CLUS_DEFAULT;
-static const char *domain_default = XLTOP_DOMAIN_DEFAULT;
+static const char *clus_default = XLTOP_CLUS;
+static const char *domain_default = XLTOP_DOMAIN;
 
 static struct hash_table xl_hash_table[NR_X_TYPES];
 
@@ -170,10 +170,10 @@ static int xl_sep(char *s, int *type, char **name)
   case 'h': i_type = X_HOST; break;
   case 'j': i_type = X_JOB; break;
   case 'c': i_type = X_CLUS; break;
-  case 'u': i_type = X_ALL_0; break;
+  case 'u': i_type = X_U; break;
   case 's': i_type = X_SERV; break;
   case 'f': i_type = X_FS; break;
-  case 'v': i_type = X_ALL_1; break;
+  case 'v': i_type = X_V; break;
   default:  i_type = x_str_type(s_type); break;
   }
 
@@ -709,10 +709,10 @@ void c_print(int y, int x, struct xl_col *c, struct xl_k *k)
 #define COL_HOST  COL_X("HOST",  0, 15)
 #define COL_JOB   COL_X("JOB",   0, (show_full_names ? 15 : 8))
 #define COL_CLUS  COL_X("CLUS",  0, 15)
-#define COL_ALL_0 COL_X("ALL",     0,  5)
+#define COL_U     COL_X("ALL",     0,  5)
 #define COL_SERV  COL_X("SERV",  1, (show_full_names ? 15 : 8))
 #define COL_FS    COL_X("FS",    1, 15)
-#define COL_ALL_1 COL_X("ALL",     1,  5)
+#define COL_V     COL_X("ALL",     1,  5)
 
 #define COL_D(name,mem,width,scale,prec) ((struct xl_col) { \
     .c_name = (name),                       \
@@ -990,75 +990,82 @@ static char *parse_sort_key(const char *key, int want_sums)
   return k;
 }
 
-static void usage(int status)
+static void print_help(void)
 {
   const char *p = program_invocation_short_name;
 
-  fprintf(status == 0 ? stdout : stderr,
-          "Usage: %s [OPTIONS]... [EXPRESSION...]\n"
-          "Expression may be one of:\n"
-          " owner=OWNER, clus[=CLUS], job[=JOB], host[=HOST], fs[=FS], serv[=SERV]\n"
-          "Types may be given by their first character; use 'u' and 'v' for the universes.\n"
-          "\nOPTIONS:\n"
-          " -c, --conf-dir=DIR          read configuration from DIR\n"
-          " -f, --full-names            show full host, job, and server names\n"
-          " -h, --help                  display this help and exit\n"
-          " -i, --interval=SECONDS      update every SECONDS sceonds\n"
-          " -k, --key=KEY1[,KEY2...]    sort results by KEY1,...\n"
-          " -l, --limit=NUM             limit responses to NUM results\n"
-          " -p, --remote-port=PORT      connect to master at PORT\n"
-          " -r, --remote-host=HOST      connect to master on HOST\n"
-          " -s, --show-sum              show sums rather than rates\n"
-          " -u, --ubuntu                look snazzy on my terminal (terrible on xterms)\n"
-          "\nSORTING:\n"
-          " Sort keys are case insensitive.  Keys containing 'W' select bytes written\n"
-          " (as a rate or sum according to use of -s, --show-sum).  Similarly keys\n"
-          " containing 'R' and 'Q' are interpreted as bytes read and requests.\n"
-          "\nEXAMPLES:\n"
-          " %s job serv (or %s j s) # Show traffic between jobs and servers\n"
-          " %s h=i101-101.ranger.tacc.utexas.edu # Show i101-101 to each filesystem\n"
-          " %s o=kbdcat h s # Show hosts in kbdcat's jobs to /scratch servers\n"
-          " %s h fs=ranger-scratch s # All hosts to /scratch servers\n"
-          " %s h s=oss23.ranger.tacc.utexas.edu # All hosts to oss23\n"
-          " %s j=2411369@ranger s # Job 2411369 to all servers\n\n"
-          , p, p, p, p, p, p, p, p);
+  printf("Usage: %s [OPTION]... [EXPRESSION...]\n"
+	 "Expression may be one of:\n"
+	 " owner=OWNER, clus[=CLUS], job[=JOB], host[=HOST], fs[=FS], serv[=SERV]\n"
+	 "Types may be given by their first character; use 'u' and 'v' for the universes.\n"
+	 "\nOPTIONS:\n"
+	 " -c, --config=DIR_OR_FILE    read configuration from DIR_OR_FILE\n"
+	 " -f, --full-names            show full host, job, and server names\n"
+	 " -h, --help                  display this help and exit\n"
+	 " -i, --interval=SECONDS      update every SECONDS sceonds\n"
+	 " -k, --key=KEY1[,KEY2...]    sort results by KEY1,...\n"
+	 " -l, --limit=NUM             limit responses to NUM results\n"
+	 " -m, --master=HOST-OR-ADDR   connect to xltop-master on HOST-OR-ADDR (default %s)\n"
+	 " -p, --port=PORT             connect to xltop-master at PORT (default %s)\n"
+	 " -s, --sum                   show sums rather than rates\n"
+	 " -u, --ubuntu                look snazzy on my terminal (terrible on xterms)\n"
+	 " -v, --version               display version information and exit\n"
+	 "\nSORTING:\n"
+	 " Sort keys are case insensitive.  Keys containing 'W' select bytes written\n"
+	 " (as a rate or sum according to use of -s, --show-sum).  Similarly keys\n"
+	 " containing 'R' and 'Q' are interpreted as bytes read and requests.\n"
+	 "\nEXAMPLES:\n"
+	 " %s job serv (or %s j s) # Show traffic between jobs and servers\n"
+	 " %s h=i101-101.ranger.tacc.utexas.edu # Show i101-101 to each filesystem\n"
+	 " %s o=kbdcat h s # Show hosts in kbdcat's jobs to /scratch servers\n"
+	 " %s h fs=ranger-scratch s # All hosts to /scratch servers\n"
+	 " %s h s=oss23.ranger.tacc.utexas.edu # All hosts to oss23\n"
+	 " %s j=2411369@ranger s # Job 2411369 to all servers\n"
+	 "\nReport bugs to <%s>.\n"
+	 , p, str_or(XLTOP_MASTER, "NONE"), XLTOP_PORT,
+	 p, p, p, p, p, p, p, PACKAGE_BUGREPORT);
+}
 
-  exit(status);
+static void print_version(void)
+{
+  printf("%s (%s) %s\n", program_invocation_short_name,
+	 PACKAGE_NAME, PACKAGE_VERSION);
 }
 
 int main(int argc, char *argv[])
 {
-  char *r_host = XLTOP_BIND_HOST, *r_port = XLTOP_BIND_PORT;
-  char *conf_dir_path = XLTOP_CONF_DIR;
+  const char *conf_arg = NULL;
+  const char *m_host = XLTOP_MASTER, *m_port = XLTOP_PORT;
   char *sort_key = NULL;
-  int want_sums = 0;
+  int want_sum = 0;
 
   struct option opts[] = {
-    { "conf-dir",    1, NULL, 'c' },
+    { "config",      1, NULL, 'c' },
     { "full-names",  0, NULL, 'f' },
     { "help",        0, NULL, 'h' },
     { "interval",    1, NULL, 'i' },
     { "key",         1, NULL, 'k' },
     { "limit",       1, NULL, 'l' },
-    { "remote-port", 1, NULL, 'p' },
-    { "remote-host", 1, NULL, 'r' },
-    { "show-sum",    0, NULL, 's' },
+    { "master",      1, NULL, 'm' },
+    { "port",        1, NULL, 'p' },
+    { "sum",         0, NULL, 's' },
     { "ubuntu",      0, NULL, 'u' },
+    { "version",     0, NULL, 'v' },
     { NULL,          0, NULL,  0  },
   };
 
   int opt;
-  while ((opt = getopt_long(argc, argv, "c:fhi:k:l:p:r:su", opts, 0)) > 0) {
+  while ((opt = getopt_long(argc, argv, "c:fhi:k:l:m:p:suv", opts, 0)) > 0) {
     switch (opt) {
     case 'c':
-      conf_dir_path = optarg;
+      conf_arg = optarg;
       break;
     case 'f':
       show_full_names = 1;
       break;
     case 'h':
-      usage(0);
-      break;
+      print_help();
+      exit(EXIT_SUCCESS);
     case 'i':
       top_interval = strtod(optarg, NULL);
       if (top_interval <= 0)
@@ -1070,25 +1077,28 @@ int main(int argc, char *argv[])
     case 'l':
       top_k_limit = strtoul(optarg, NULL, 0);
       break;
-    case 'p':
-      r_port = optarg;
+    case 'm':
+      m_host = optarg;
       break;
-    case 'r':
-      r_host = optarg;
+    case 'p':
+      m_port = optarg;
       break;
     case 's':
-      want_sums = 1;
+      want_sum = 1;
       break;
     case 'u':
       fs_color_pair = CP_YELLOW;
       top_color_pair = CP_MAGENTA;
       break;
+    case 'v':
+      print_version();
+      exit(EXIT_SUCCESS);
     case '?':
       FATAL("Try `%s --help' for more information.\n", program_invocation_short_name);
     }
   }
 
-  if (conf_dir_path != NULL)
+  if (str_is_set(conf_arg))
     /* TODO */;
 
   if (top_interval <= 0)
@@ -1097,25 +1107,25 @@ int main(int argc, char *argv[])
   if (top_k_limit <= 0)
     FATAL("invalid limit %zu, must be positive\n", top_k_limit);
 
-  if (r_host == NULL || strlen(r_host) == 0)
-    FATAL("no remote host specified\n");
+  if (!str_is_set(m_host))
+    FATAL("no host or address specified for xltop-master\n");
 
-  if (r_port == NULL || strlen(r_port) == 0)
-    FATAL("no remote port specified\n");
+  if (!str_is_set(m_port))
+    FATAL("no port specified for xltop-master\n");
 
   int curl_rc = curl_global_init(CURL_GLOBAL_NOTHING);
   if (curl_rc != 0)
     FATAL("cannot initialize curl: %s\n", curl_easy_strerror(curl_rc));
 
-  if (curl_x_init(&curl_x, r_host, r_port) < 0)
+  if (curl_x_init(&curl_x, m_host, m_port) < 0)
     FATAL("cannot initialize curl handle: %m\n");
 
   if (sort_key != NULL)
-    sort_key = parse_sort_key(sort_key, want_sums);
+    sort_key = parse_sort_key(sort_key, want_sum);
 
   /* Parse top spec. */
   char *x[2] = { "ALL", "ALL" };
-  int t[2] = { X_ALL_0, X_ALL_1 };
+  int t[2] = { X_U, X_V };
   int c[2] = { X_JOB, X_FS };
   char *owner = NULL;
 
@@ -1133,10 +1143,10 @@ int main(int argc, char *argv[])
     case 'h': ti = X_HOST; break;
     case 'j': ti = X_JOB; break;
     case 'c': ti = X_CLUS; break;
-    case 'u': ti = X_ALL_0; break;
+    case 'u': ti = X_U; break;
     case 's': ti = X_SERV; break;
     case 'f': ti = X_FS; break;
-    case 'v': ti = X_ALL_1; break;
+    case 'v': ti = X_V; break;
     case 'o': owner = s; continue;
     default:  ti = x_str_type(s_type); break;
     }
@@ -1153,7 +1163,7 @@ int main(int argc, char *argv[])
       x_set[ti] = xi;
   }
 
-  for (i = X_ALL_0; i >= X_HOST; i--) {
+  for (i = X_U; i >= X_HOST; i--) {
     if (t_set[i])
       c[0] = i;
     if (x_set[i] != NULL) {
@@ -1162,7 +1172,7 @@ int main(int argc, char *argv[])
     }
   }
 
-  for (i = X_ALL_1; i >= X_SERV; i--) {
+  for (i = X_V; i >= X_SERV; i--) {
     if (t_set[i])
       c[1] = i;
     if (x_set[i] != NULL) {
@@ -1175,7 +1185,7 @@ int main(int argc, char *argv[])
   if (t[0] == X_HOST) {
     if (strchr(x[0], '.') == NULL) {
       /* TODO Try to pull domain from clus if given. */
-      if (strlen(domain_default) != 0)
+      if (str_is_set(domain_default))
         x[0] = strf("%s.%s", x[0], domain_default);
       else
         FATAL("invalid host `%s': must specify a fully qualified domain name\n",
@@ -1185,7 +1195,7 @@ int main(int argc, char *argv[])
     if (strchr(x[0], '@') == NULL) {
       if (x_set[X_CLUS] != NULL)
         x[0] = strf("%s@%s", x[0], x_set[X_CLUS]);
-      else if (strlen(clus_default) != 0)
+      else if (str_is_set(clus_default))
         x[0] = strf("%s@%s", x[0], clus_default);
       else
         FATAL("must specify job as JOBID@CLUS or pass clus=CLUS\n");
@@ -1195,7 +1205,7 @@ int main(int argc, char *argv[])
   if (t[1] == X_SERV) {
     if (strchr(x[1], '.') == NULL) {
       /* TODO Try to pull domain from clus if given. */
-      if (strlen(domain_default) != 0)
+      if (str_is_set(domain_default))
         x[1] = strf("%s.%s", x[1], domain_default);
       else
         FATAL("invalid serv `%s: must specify a fully qualified domain name\n",
@@ -1212,11 +1222,11 @@ int main(int argc, char *argv[])
   /* Initialize columns. */
 
   top_col[0] = c[0] == X_HOST ? COL_HOST : c[0] == X_JOB ? COL_JOB :
-    c[0] == X_CLUS ? COL_CLUS: COL_ALL_0;
-  top_col[1] = c[1] == X_SERV ? COL_SERV : c[1] == X_FS ? COL_FS : COL_ALL_1;
-  top_col[2] = want_sums ? COL_WR_MB_SUM : COL_WR_MB_RATE;
-  top_col[3] = want_sums ? COL_RD_MB_SUM : COL_RD_MB_RATE;
-  top_col[4] = want_sums ? COL_REQS_SUM : COL_REQS_RATE;
+    c[0] == X_CLUS ? COL_CLUS: COL_U;
+  top_col[1] = c[1] == X_SERV ? COL_SERV : c[1] == X_FS ? COL_FS : COL_V;
+  top_col[2] = want_sum ? COL_WR_MB_SUM : COL_WR_MB_RATE;
+  top_col[3] = want_sum ? COL_RD_MB_SUM : COL_RD_MB_RATE;
+  top_col[4] = want_sum ? COL_REQS_SUM : COL_REQS_RATE;
 
   if (c[0] == X_HOST) {
     top_col[5] = COL_JOBID;
