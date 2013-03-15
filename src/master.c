@@ -3,10 +3,10 @@
 #include <errno.h>
 #include <getopt.h>
 #include <malloc.h>
-#include <ncurses.h>
 #include <signal.h>
 #include <time.h>
 #include <unistd.h>
+#include <libgen.h>
 #include <ev.h>
 #include "ap_parse.h"
 #include "x_botz.h"
@@ -18,11 +18,11 @@
 #include "fs.h"
 #include "lnet.h"
 #include "serv.h"
-#include "screen.h"
 #include "xltop.h"
+#include "pidfile.h"
 #include "trace.h"
 
-#define XLTOP_BIND_ADDR "0.0.0.0"
+#define XLTOP_BIND "0.0.0.0"
 #define XLTOP_CLUS_INTERVAL 120.0
 #define XLTOP_NR_HOSTS_HINT 4096
 #define XLTOP_NR_JOBS_HINT 256
@@ -184,147 +184,91 @@ static void fs_cfg(EV_P_ cfg_t *cfg, char *addr, char *port)
   }
 }
 
-/* Screen callbacks. */
-
-static void print_top_1(int line, int COLS, const struct k_node *k)
+static void sigterm_cb(EV_P_ ev_signal *w, int revents)
 {
-  const char *owner = "";
-  const char *title = "";
-  char hosts[3 * sizeof(size_t) + 1] = "-";
-
-  int job_col_width = COLS - 78;
-
-  if (job_col_width < 15)
-    job_col_width = 15;
-
-  if (x_is_job(k->k_x[0])) {
-    const struct job_node *j = container_of(k->k_x[0], struct job_node, j_x);
-    owner = j->j_owner;
-    title = j->j_title;
-    snprintf(hosts, sizeof(hosts), "%zu", k->k_x[0]->x_nr_child);
-  }
-
-  mvprintw(line, 0,
-           "%-*s %-15s %10.3f %10.3f %10.3f %10s %10s %5s",
-           job_col_width, k->k_x[0]->x_name, k->k_x[1]->x_name,
-           k->k_rate[STAT_WR_BYTES] / 1048676,
-           k->k_rate[STAT_RD_BYTES] / 1048576,
-           k->k_rate[STAT_NR_REQS],
-           owner, title, hosts);
+  ev_break(EV_A_ EVBREAK_ALL);
 }
 
-static void screen_refresh_cb(EV_P_ int LINES, int COLS)
+static void print_help(void)
 {
-  time_t now = ev_now(EV_A);
-  int job_col_width = COLS - 77;
-  int nr_hdr_lines = 2;
-  char nr_buf[256];
-  int nr_len;
+  const char *p = program_invocation_short_name;
 
-  erase();
-
-  if (job_col_width < 15)
-    job_col_width = 15;
-
-  mvprintw(0, 0, "%s - %s\n", program_invocation_short_name, ctime(&now));
-
-  nr_len = snprintf(nr_buf, sizeof(nr_buf),
-                    "H %zu, J %zu, C %zu, S %zu, F %zu, K %zu",
-                    x_types[X_HOST].x_nr, x_types[X_JOB].x_nr, x_types[X_CLUS].x_nr,
-                    x_types[X_SERV].x_nr, x_types[X_FS].x_nr, nr_k);
-
-  mvprintw(0, COLS - nr_len, "%s", nr_buf);
-
-  mvprintw(1, 0, "%-*s %-15s %10s %10s %10s %10s %10s %5s",
-           job_col_width, "JOB", "FS", "WR_MB/S", "RD_MB/S", "REQ/S",
-           "OWNER", "TITLE", "HOSTS");
-  mvchgat(1, 0, -1, A_STANDOUT, CP_RED, NULL);
-
-  /* Print body. */
-
-  size_t i, limit = LINES - nr_hdr_lines - 1;
-  struct k_top t = {
-    .t_spec = {
-      offsetof(struct k_node, k_rate[STAT_WR_BYTES]),
-      offsetof(struct k_node, k_rate[STAT_RD_BYTES]),
-      offsetof(struct k_node, k_rate[STAT_NR_REQS]),
-      -1,
-    }
-  };
-
-  if (!(limit < 1024))
-    limit = 1024;
-
-  if (k_heap_init(&t.t_h, limit) < 0) {
-    ERROR("cannot initialize k_heap: %m\n");
-    goto out;
-  }
-
-  k_heap_top(&t.t_h, x_all[0], 2, x_all[1], 1, NULL, &k_top_cmp, now);
-  k_heap_order(&t.t_h, &k_top_cmp);
-
-  for (i = 0; i < t.t_h.h_count; i++)
-    print_top_1(nr_hdr_lines + i, COLS, t.t_h.h_k[i]);
-
- out:
-  k_heap_destroy(&t.t_h);
-}
-
-static void usage(int status)
-{
-  fprintf(status == 0 ? stdout : stderr,
-          "Usage: %s [OPTIONS]...\n"
+  printf("Usage: %s [OPTION]...\n"
           /* ... */
-          "\nOPTIONS:\n"
-          " -c, --conf=FILE\n"
-          /* TODO */
-          ,
-          program_invocation_short_name);
-  exit(status);
+	 "Mandatory arguments to long options are mandatory for short options too.\n"
+	 " -b, --bind=ADDR           listen for connections on ADDR (default %s)\n"
+	 " -c, --config=DIR_OR_FILE  read configuration from DIR_OR_FILE\n"
+	 " -d, --daemon              detach and run in the background\n"
+	 " -h, --help                display this help and exit\n"
+	 " -p, --port=PORT           listen on PORT (default %s)\n"
+	 " -P, --pidfile=PATH        write PID to PATH\n"
+	 " -v, --version             display version information and exit\n"
+	 "\nReport %s bugs to <%s>.\n"
+	 , p, XLTOP_BIND, XLTOP_PORT, p, PACKAGE_BUGREPORT);
+}
+
+static void print_version(void)
+{
+  printf("%s (%s) %s\n", program_invocation_short_name,
+	 PACKAGE_NAME, PACKAGE_VERSION);
 }
 
 int main(int argc, char *argv[])
 {
-  char *bind_addr = XLTOP_BIND_ADDR;
-  char *bind_port = XLTOP_BIND_PORT;
-  char *conf_dir_path = XLTOP_CONF_DIR;
-  char *conf_file_name = "master.conf";
+  char *b_addr = XLTOP_BIND, *b_port = XLTOP_PORT;
+  const char *conf_arg = NULL;
+  const char *conf_dir_path = XLTOP_CONF_DIR;
+  const char *conf_file_name = NULL;
+  const char *conf_file_list[] = {
+    "master.conf",
+    "xltop-master.conf",
+  };
+  FILE *conf_file = NULL;
+  int pidfile_fd = -1;
+  const char *pidfile_path = NULL;
   int want_daemon = 0;
+  size_t i;
 
   struct option opts[] = {
-    { "bind-addr",   1, NULL, 'a' },
-    { "conf-dir",    1, NULL, 'c' },
-    { "daemon",      0, NULL, 'd' },
-    { "help",        0, NULL, 'h' },
-    { "bind-port",   1, NULL, 'p' },
-    { NULL,          0, NULL,  0  },
+    { "bind",     1, NULL, 'b' },
+    { "config",   1, NULL, 'c' },
+    { "daemon",   0, NULL, 'd' },
+    { "help",     0, NULL, 'h' },
+    { "port",     1, NULL, 'p' },
+    { "pidfile",  1, NULL, 'P' },
+    { "version",  0, NULL, 'v' },
+    { NULL,       0, NULL,  0  },
   };
 
   int opt;
-  while ((opt = getopt_long(argc, argv, "a:c:dhp:", opts, 0)) > 0) {
+  while ((opt = getopt_long(argc, argv, "b:c:dhP:p:v", opts, 0)) > 0) {
     switch (opt) {
-    case 'a':
-      bind_addr = optarg;
+    case 'b':
+      b_addr = optarg;
     case 'c':
-      conf_dir_path = optarg;
+      conf_arg = optarg;
       break;
     case 'd':
       want_daemon = 1;
       break;
     case 'h':
-      usage(0);
+      print_help();
+      exit(EXIT_SUCCESS);
+    case 'P':
+      pidfile_path = optarg;
       break;
     case 'p':
-      bind_port = optarg;
+      b_port = optarg;
       break;
+    case 'v':
+      print_version();
+      exit(EXIT_SUCCESS);
     case '?':
       FATAL("Try `%s --help' for more information.\n", program_invocation_short_name);
     }
   }
 
-  if (chdir(conf_dir_path) < 0)
-    FATAL("cannot access `%s': %m\n", conf_dir_path);
-
+  /* Config! */
   cfg_opt_t main_cfg_opts[] = {
     BIND_CFG_OPTS,
     CFG_FLOAT("tick", K_TICK, CFGF_NONE),
@@ -338,9 +282,55 @@ int main(int argc, char *argv[])
   };
 
   cfg_t *main_cfg = cfg_init(main_cfg_opts, 0);
+  int cfg_rc;
 
+  if (conf_arg == NULL)
+    goto have_conf_dir;
+
+  struct stat st;
+  if (stat(conf_arg, &st) < 0)
+    FATAL("cannot stat config dir or file `%s': %s\n",
+          conf_arg, strerror(errno));
+
+  if (S_ISDIR(st.st_mode)) {
+    conf_dir_path = conf_arg;
+    goto have_conf_dir;
+  }
+
+  conf_file_name = conf_arg;
+  conf_file = fopen(conf_file_name, "r");
+  if (conf_file == NULL)
+    FATAL("cannot open config file `%s': %s\n",
+          conf_file_name, strerror(errno));
+
+  {
+    char *conf_arg_tmp = strdup(conf_arg);
+    char *conf_dir_tmp = dirname(conf_arg_tmp);
+    conf_dir_path = strdup(conf_dir_tmp);
+    free(conf_arg_tmp);
+  }
+
+have_conf_dir:
+  if (chdir(conf_dir_path) < 0)
+    FATAL("cannot access config dir `%s': %m\n", conf_dir_path);
+
+  if (conf_file != NULL)
+    goto have_conf_file;
+
+  for (i = 0; i < sizeof(conf_file_list) / sizeof(conf_file_list[0]); i++) {
+    conf_file_name = conf_file_list[i];
+    conf_file = fopen(conf_file_name, "r");
+    if (conf_file != NULL)
+      goto have_conf_file;
+  }
+
+  FATAL("cannot access `%s' or `%s' in `%s': %s\n",
+        conf_file_list[0], conf_file_list[1],
+        conf_dir_path, strerror(errno));
+
+have_conf_file:
   errno = 0;
-  int cfg_rc = cfg_parse(main_cfg, conf_file_name);
+  cfg_rc = cfg_parse_fp(main_cfg, conf_file);
   if (cfg_rc == CFG_FILE_ERROR) {
     if (errno == 0)
       errno = ENOENT;
@@ -364,7 +354,6 @@ int main(int argc, char *argv[])
   size_t nr_serv = 0;
   size_t nr_domain = 0;
 
-  size_t i;
   for (i = 0; i < nr_fs; i++)
     nr_serv += cfg_size(cfg_getnsec(main_cfg, "fs", i), "servs");
 
@@ -386,7 +375,7 @@ int main(int argc, char *argv[])
 
   x_listen.bl_conn_timeout = 600; /* XXX */
 
-  if (bind_cfg(main_cfg, bind_addr, bind_port) < 0)
+  if (bind_cfg(main_cfg, b_addr, b_port) < 0)
     FATAL("%s: invalid bind config\n", conf_file_name);
 
   for (i = 0; i < NR_X_TYPES; i++)
@@ -405,7 +394,7 @@ int main(int argc, char *argv[])
   for (i = 0; i < nr_clus; i++)
     clus_cfg(EV_DEFAULT_
              cfg_getnsec(main_cfg, "clus", i),
-             bind_addr, bind_port);
+             b_addr, b_port);
 
   size_t nr_lnet = cfg_size(main_cfg, "lnet");
   for (i = 0; i < nr_lnet; i++)
@@ -414,9 +403,10 @@ int main(int argc, char *argv[])
   for (i = 0; i < nr_fs; i++)
     fs_cfg(EV_DEFAULT_
            cfg_getnsec(main_cfg, "fs", i),
-           bind_addr, bind_port);
+           b_addr, b_port);
 
   cfg_free(main_cfg);
+  fclose(conf_file);
 
   extern const struct botz_entry_ops top_entry_ops; /* MOVEME */
   if (botz_add(&x_listen, "top", &top_entry_ops, NULL) < 0)
@@ -430,19 +420,25 @@ int main(int argc, char *argv[])
 
   evx_listen_start(EV_DEFAULT_ &x_listen.bl_listen);
 
-  if (want_daemon) {
+  if (want_daemon)
     daemon(0, 0);
-  } else {
+  else
     chdir("/");
-    if (screen_init(&screen_refresh_cb, 1) < 0)
-      FATAL("cannot initialize screen: %m\n");
-    screen_start(EV_DEFAULT);
+
+  if (pidfile_path != NULL) {
+    pidfile_fd = pidfile_create(pidfile_path);
+    if (pidfile_fd < 0)
+      FATAL("exiting\n");
   }
+
+  static struct ev_signal sigterm_w;
+  ev_signal_init(&sigterm_w, &sigterm_cb, SIGTERM);
+  ev_signal_start(EV_DEFAULT_ &sigterm_w);
 
   ev_run(EV_DEFAULT_ 0);
 
-  if (screen_is_active)
-    screen_stop(EV_DEFAULT);
+  if (pidfile_path != NULL)
+    unlink(pidfile_path);
 
-  return 0;
+  FATAL("exiting\n");
 }

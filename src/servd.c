@@ -17,7 +17,7 @@
 #include "string1.h"
 #include "trace.h"
 #include "curl_x.h"
-#include "getcanonname.h"
+#include "pidfile.h"
 
 #define NR_LXT_HINT 16
 #define NR_NID_HINT 4096
@@ -67,10 +67,12 @@ struct nid_stats {
   char ns_nid[];
 };
 
-#define LXT_TYPE_MDT 0
-#define LXT_TYPE_OST 1
+#define LXT_TYPE_MDS 0
+#define LXT_TYPE_MDT 1
+#define LXT_TYPE_OST 2
 static const char *top_dir_path[] = {
-  [LXT_TYPE_MDT] = "/proc/fs/lustre/mds",
+  [LXT_TYPE_MDS] = "/proc/fs/lustre/mds",
+  [LXT_TYPE_MDT] = "/proc/fs/lustre/mdt",
   [LXT_TYPE_OST] = "/proc/fs/lustre/obdfilter",
 };
 
@@ -221,7 +223,7 @@ struct lxt *lxt_lookup(const char *name, int type)
 
   hlist_add_head(&l->l_hash_node, head);
   list_add(&l->l_link, &lxt_list);
-  l->l_type = type;
+  l->l_type = (type == LXT_TYPE_MDS) ? LXT_TYPE_MDT : type;
 
   if (l->l_type == LXT_TYPE_MDT)
     serv_status.ss_nr_mdt++;
@@ -336,7 +338,7 @@ static void collect_all(double now)
 
   ASSERT(list_empty(&lxt_list));
 
-  for (i = 0; i < 2; i++) {
+  for (i = 0; i < sizeof(top_dir_path) / sizeof(top_dir_path[0]); i++) {
     DIR *top_dir = NULL;
 
     top_dir = opendir(top_dir_path[i]);
@@ -548,52 +550,71 @@ static void clock_cb(EV_P_ ev_periodic *w, int revents)
   TRACE("end\n\n\n\n");
 }
 
-static void usage(int status)
+static void sigterm_cb(EV_P_ ev_signal *w, int revents)
 {
-  fprintf(status == 0 ? stdout : stderr,
-          "Usage: %s [OPTIONS]...\n"
-          /* ... */
-          "\nOPTIONS:\n"
-          " -a, --addr=ADDR  \n"
-          /* ... */
-          ,
-          program_invocation_short_name);
+  ev_break(EV_A_ EVBREAK_ALL);
+}
 
-  exit(status);
+static void print_help(void)
+{
+  const char *p = program_invocation_short_name;
+
+  printf("Usage: %s [OPTION]... [EXPRESSION...]\n"
+	 "\nOPTIONS:\n"
+	 " -c, --config=DIR_OR_FILE    read configuration from DIR_OR_FILE\n"
+	 " -d, --daemon                detach and run in the background\n"
+	 " -h, --help                  display this help and exit\n"
+	 " -i, --interval=SECONDS      set connection interval\n"
+	 " -n, --nr-nids=N             expect N client NIDs per target\n"
+	 " -m, --master=HOST-OR-ADDR   connect to master on HOST-OR-ADDR (default %s)\n"
+	 " -P, --pidfile=PATH          write PID to PATH\n"
+	 " -p, --port=PORT             connect to master at PORT (default %s)\n"
+	 " -v, --version               display version information and exit\n"
+	 "\nReport %s bugs to <%s>.\n"
+	 , p, str_or(XLTOP_MASTER, "NONE"), XLTOP_PORT, p, PACKAGE_BUGREPORT);
+}
+
+static void print_version(void)
+{
+  printf("%s (%s) %s\n", program_invocation_short_name,
+	 PACKAGE_NAME, PACKAGE_VERSION);
 }
 
 int main(int argc, char *argv[])
 {
-  char *r_host = NULL, *r_port = XLTOP_BIND_PORT;
-  char *conf_dir_path = NULL;
+  const char *m_host = XLTOP_MASTER, *m_port = XLTOP_PORT;
+  char *conf_arg = NULL;
   double interval = 120, offset = 0;
-  int want_foreground = 0;
+  int pidfile_fd = -1;
+  const char *pidfile_path = NULL;
+  int want_daemon = 0;
 
   struct option opts[] = {
-    { "conf-dir",    1, NULL, 'c' },
-    { "foreground",  0, NULL, 'f' },
+    { "config",      1, NULL, 'c' },
+    { "daemon",      0, NULL, 'd' },
     { "help",        0, NULL, 'h' },
     { "interval",    1, NULL, 'i' },
     { "nr-nids",     1, NULL, 'n' },
-    { "offset",      1, NULL, 'o' },
-    { "remote-port", 1, NULL, 'p' },
-    { "remote-host", 1, NULL, 'r' },
+    { "master",      1, NULL, 'm' },
+    { "pidfile",     1, NULL, 'P' },
+    { "port",        1, NULL, 'p' },
     { "server-name", 1, NULL, 's' },
+    { "version",     0, NULL, 'v' },
     { NULL,          0, NULL,  0  },
   };
 
   int c;
-  while ((c = getopt_long(argc, argv, "c:fhi:n:o:p:r:s:", opts, 0)) > 0) {
+  while ((c = getopt_long(argc, argv, "c:dhi:n:m:P:p:s:v", opts, 0)) > 0) {
     switch (c) {
     case 'c':
-      conf_dir_path = optarg;
+      conf_arg = optarg;
       break;
-    case 'f':
-      want_foreground = 1;
+    case 'd':
+      want_daemon = 1;
       break;
     case 'h':
-      usage(0);
-      break;
+      print_help();
+      exit(EXIT_SUCCESS);
     case 'i':
       interval = strtod(optarg, NULL);
       if (interval <= 0)
@@ -602,54 +623,51 @@ int main(int argc, char *argv[])
     case 'n':
       nr_nid_hint = strtoul(optarg, NULL, 0);
       break;
-    case 'o':
-      offset = strtod(optarg, NULL);
+    case 'm':
+      m_host = optarg;
+      break;
+    case 'P':
+      pidfile_path = optarg;
       break;
     case 'p':
-      r_port = optarg;
-      break;
-    case 'r':
-      r_host = optarg;
+      m_port = optarg;
       break;
     case 's':
       serv_name = optarg;
       break;
+    case 'v':
+      print_version();
+      exit(EXIT_SUCCESS);
     case '?':
       FATAL("Try `%s --help' for more information.\n", program_invocation_short_name);
     }
   }
 
-  if (conf_dir_path != NULL)
+  if (str_is_set(conf_arg))
     /* TODO */;
 
   if (offset < 0)
     FATAL("invalid offset %f, must be nonnegative\n", offset);
   offset = fmod(offset, interval);
 
-  if (getcanonname(NULL, host_name, sizeof(host_name)) < 0)
-    FATAL("cannot get host name: %m\n");
-
-  if (serv_name == NULL)
+  if (serv_name == NULL) {
+    if (gethostname(host_name, sizeof(host_name)) < 0)
+      FATAL("cannot get host name: %m\n");
     serv_name = host_name;
+  }
 
-  if (r_host == NULL)
-    FATAL("no remote host specified\n");
+  if (!str_is_set(m_host))
+    FATAL("no host or address specified for master\n");
 
-  if (r_port == NULL)
-    FATAL("no remote port specified\n");
+  if (!str_is_set(m_port))
+    FATAL("no port specified for master\n");
 
   int curl_rc = curl_global_init(CURL_GLOBAL_NOTHING);
   if (curl_rc != 0)
     FATAL("cannot initialize curl: %s\n", curl_easy_strerror(curl_rc));
 
-  if (curl_x_init(&curl_x, r_host, r_port) < 0)
+  if (curl_x_init(&curl_x, m_host, m_port) < 0)
     FATAL("cannot initialize curl handle: %m\n");
-
-  ev_periodic_init(&clock_w, &clock_cb, offset, interval, NULL);
-
-  ev_periodic_start(EV_DEFAULT_ &clock_w);
-
-  ev_feed_event(EV_DEFAULT_ &clock_w, EV_PERIODIC);
 
   if (hash_table_init(&nid_hash_table, nr_nid_hint) < 0)
     FATAL("cannot initialize nid hash: %m\n");
@@ -657,15 +675,32 @@ int main(int argc, char *argv[])
   if (hash_table_init(&lxt_hash_table, NR_LXT_HINT) < 0)
     FATAL("cannot initialize target hash: %m\n");
 
-  if (!want_foreground && daemon(0, 0) < 0)
+  if (want_daemon && daemon(0, 0) < 0)
     FATAL("cannot daemonize: %m\n");
 
+  if (pidfile_path != NULL) {
+    pidfile_fd = pidfile_create(pidfile_path);
+    if (pidfile_fd < 0)
+      FATAL("exiting\n");
+  }
+
   signal(SIGPIPE, SIG_IGN);
+
+  static struct ev_signal sigterm_w;
+  ev_signal_init(&sigterm_w, &sigterm_cb, SIGTERM);
+  ev_signal_start(EV_DEFAULT_ &sigterm_w);
+
+  ev_periodic_init(&clock_w, &clock_cb, offset, interval, NULL);
+  ev_periodic_start(EV_DEFAULT_ &clock_w);
+  ev_feed_event(EV_DEFAULT_ &clock_w, EV_PERIODIC);
 
   ev_run(EV_DEFAULT_ 0);
 
   curl_x_destroy(&curl_x);
   curl_global_cleanup();
 
-  return 0;
+  if (pidfile_path != NULL)
+    unlink(pidfile_path);
+
+  FATAL("exiting\n");
 }
